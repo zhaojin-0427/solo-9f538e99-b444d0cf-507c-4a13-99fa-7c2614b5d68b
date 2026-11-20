@@ -45,6 +45,23 @@ def _intervals_from_form(form):
     return [row for row in rows if any(str(value).strip() for value in row.values())]
 
 
+def _form_draft(form):
+    return {
+        "sku": form.get("sku", ""),
+        "reason": form.get("reason", ""),
+        "base_version": form.get("base_version", ""),
+        "intervals": _raw_intervals_from_form(form),
+    }
+
+
+def _review_receipt(form):
+    """Build the review receipt payload from the confirmation form."""
+    return {
+        "token": form.get("review_token", ""),
+        "reviewed_version": form.get("reviewed_version", ""),
+    }
+
+
 def create_app(test_config=None):
     app = Flask(__name__, instance_relative_config=False)
     app.config.update(
@@ -190,14 +207,22 @@ def create_app(test_config=None):
             groups=knowledge.version_ranges_for_display(db, selected["version_no"])
             if selected
             else [],
+            selected_review=(
+                knowledge.review_for_version(db, selected["version_no"])
+                if selected
+                else None
+            ),
             form=None,
             error=None,
             error_details=[],
+            can_review=False,
+            review_url=None,
         )
 
     @app.post("/knowledge")
     def knowledge_submit():
         db = get_db()
+        form_draft = _form_draft(request.form)
         try:
             intervals = _intervals_from_form(request.form)
             result = knowledge.register_ranges(
@@ -208,31 +233,147 @@ def create_app(test_config=None):
                 base_version=request.form.get("base_version") or None,
             )
         except (ValidationError, ConflictError, NotFoundError) as exc:
+            # The draft and its original base stay on screen untouched. Every
+            # other SKU's ranges shown alongside them come from the *current*
+            # ledger, so it is visible that a newer correction has landed.
             versions = knowledge.list_versions(db)
             latest = knowledge.current_version(db)
+            draft_base = request.form.get("base_version") or None
             return (
                 render_template(
                     "knowledge.html",
                     versions=versions,
                     selected=latest,
                     latest=latest,
-                    base_version=latest["version_no"] if latest else "",
+                    base_version=draft_base if draft_base else "",
                     groups=knowledge.version_ranges_for_display(db, latest["version_no"])
                     if latest
                     else [],
-                    form={
-                        "sku": request.form.get("sku", ""),
-                        "reason": request.form.get("reason", ""),
-                        "intervals": _raw_intervals_from_form(request.form),
-                    },
+                    form=form_draft,
                     error=exc.message,
                     error_details=getattr(exc, "details", []),
+                    can_review=(
+                        isinstance(exc, ConflictError)
+                        and draft_base
+                        and latest is not None
+                        and str(latest["version_no"]) != str(draft_base)
+                    ),
+                    review_url=url_for("knowledge_review"),
                 ),
                 400 if isinstance(exc, ValidationError) else 409,
             )
         flash(
             f"已生成知识版号 v{result['version_no']}（基准 v{result['based_on_version']}），"
             f"SKU {result['sku']} 共 {result['range_count']} 段区间。旧版号口径保持不变。",
+            "success",
+        )
+        return redirect(url_for("knowledge_page", version=result["version_no"]))
+
+    @app.post("/knowledge/review")
+    def knowledge_review():
+        """Open the side-by-side review page for a stale draft."""
+        db = get_db()
+        form = request.form
+        try:
+            state = knowledge.prepare_review(
+                db,
+                sku=form.get("sku"),
+                intervals=_intervals_from_form(form),
+                reason=form.get("reason"),
+                base_version=form.get("base_version") or None,
+                secret=current_app.config["SECRET_KEY"],
+            )
+        except (ValidationError, ConflictError) as exc:
+            return _knowledge_error(db, exc, _form_draft(form))
+        return _render_review(state)
+
+    @app.get("/knowledge/review")
+    def knowledge_review_token():
+        db = get_db()
+        try:
+            state = knowledge.review_draft(
+                db,
+                request.args.get("token", ""),
+                secret=current_app.config["SECRET_KEY"],
+            )
+        except (ValidationError, ConflictError) as exc:
+            return _knowledge_error(db, exc, None)
+        return _render_review(state)
+
+    def _render_review(state):
+        return render_template(
+            "review.html",
+            state=state,
+            selected_version=state["reviewed_version"],
+        )
+
+    def _knowledge_error(db, exc, form):
+        versions = knowledge.list_versions(db)
+        latest = knowledge.current_version(db)
+        return (
+            render_template(
+                "knowledge.html",
+                versions=versions,
+                selected=latest,
+                latest=latest,
+                base_version=(form or {}).get("base_version", "")
+                if form
+                else "",
+                groups=knowledge.version_ranges_for_display(db, latest["version_no"])
+                if latest
+                else [],
+                form=form,
+                error=exc.message,
+                error_details=getattr(exc, "details", []),
+                can_review=False,
+                review_url=None,
+            ),
+            400 if isinstance(exc, ValidationError) else 409,
+        )
+
+    @app.post("/knowledge/review/confirm")
+    def knowledge_review_confirm():
+        db = get_db()
+        form = request.form
+        receipt = _review_receipt(form)
+        try:
+            state = knowledge.review_draft(
+                db,
+                receipt["token"],
+                secret=current_app.config["SECRET_KEY"],
+            )
+            result = knowledge.register_ranges(
+                db,
+                sku=form.get("sku"),
+                intervals=_intervals_from_form(form),
+                reason=form.get("reason"),
+                base_version=form.get("base_version") or None,
+                review=receipt,
+                secret=current_app.config["SECRET_KEY"],
+            )
+        except (ValidationError, ConflictError, NotFoundError) as exc:
+            try:
+                state = knowledge.review_draft(
+                    db,
+                    receipt["token"],
+                    secret=current_app.config["SECRET_KEY"],
+                )
+            except (ValidationError, ConflictError):
+                return _knowledge_error(db, exc, None)
+            return (
+                render_template(
+                    "review.html",
+                    state=state,
+                    selected_version=state["reviewed_version"],
+                    error=exc.message,
+                    error_details=getattr(exc, "details", []),
+                ),
+                400 if isinstance(exc, ValidationError) else 409,
+            )
+        flash(
+            f"经核对已生成知识版号 v{result['version_no']}：草稿原基准 v{result['based_on_version']}，"
+            f"核对时当前版 v{result['reviewed_version']}，SKU {result['sku']} 整组替换为 "
+            f"{result['range_count']} 段。旧版号口径保持不变。",
             "success",
         )
         return redirect(url_for("knowledge_page", version=result["version_no"]))
@@ -299,6 +440,7 @@ def create_app(test_config=None):
             {
                 "ok": True,
                 "version": dict(row),
+                "review": knowledge.review_for_version(db, version_no),
                 "skus": knowledge.version_ranges_for_display(db, version_no),
             }
         )

@@ -7,6 +7,13 @@
   <div class="flash flash-error">
     <strong>{{ error }}</strong>
     {% if error_details %}<ul>{% for detail in error_details %}<li>{{ detail }}</li>{% endfor %}</ul>{% endif %}
+    {% if can_review %}
+      <p class="muted">
+        下方草稿与它的原基准 <strong>v{{ base_version }}</strong> 都保留着。
+        普通重提仍会按原基准校验；如确实要以草稿整组替换当前版中该 SKU 的全部区间，
+        请先并排核对，再明确确认。
+      </p>
+    {% endif %}
   </div>
 {% endif %}
 
@@ -37,6 +44,14 @@
     <h2>{% if selected %}v{{ selected.version_no }} 的区间{% else %}尚未登记{% endif %}</h2>
     {% if selected %}
       <p class="muted">创建于 {{ display_utc(selected.created_at) }}，原因：{{ selected.reason }}</p>
+      {% if selected_review %}
+        <p class="muted">
+          该版由核对确认生成：草稿原基准
+          <strong>v{{ selected_review.draft_base_version }}</strong>，核对时当前版
+          <strong>v{{ selected_review.reviewed_version }}</strong>，SKU
+          <strong>{{ selected_review.sku }}</strong> 整组替换。
+        </p>
+      {% endif %}
       {% if groups %}
         {% for group in groups %}
           <div class="sku-block">
@@ -62,16 +77,17 @@
   </div>
 </section>
 
-{% set form_data = form if form else {'sku': '', 'reason': '', 'intervals': [{'zone': '', 'valid_from': '', 'valid_to': ''}]} %}
+{% set form_data = form if form else {'sku': '', 'reason': '', 'base_version': base_version, 'intervals': [{'zone': '', 'valid_from': '', 'valid_to': ''}]} %}
 <section class="card">
   <h2>整组更正并生成新版号</h2>
   <p class="muted">
-    本次提交会以 <strong>{{ ('v' ~ base_version) if base_version else '空账本' }}</strong> 为基准，
-    用下列区间<strong>整体替换</strong>该 SKU 的区间；其他 SKU 的区间原样带入新版。
+    本次提交会以草稿所依据的版本
+    <strong>{{ ('v' ~ form_data.base_version) if form_data.base_version else '空账本' }}</strong>
+    为基准，用下列区间<strong>整体替换</strong>该 SKU 的区间；其他 SKU 的区间原样带入新版。
     同一 SKU 区间不得重叠，空档期间的出库将列为未归类。
   </p>
   <form method="post" action="{{ url_for('knowledge_submit') }}" class="stack" id="knowledge-form">
-    <input type="hidden" name="base_version" value="{{ base_version }}">
+    <input type="hidden" name="base_version" value="{{ form_data.base_version }}">
     <div class="inline">
       <label>SKU <input type="text" name="sku" value="{{ form_data.sku }}" required maxlength="64"></label>
       <label class="grow">更正原因 <input type="text" name="reason" value="{{ form_data.reason }}" required maxlength="500"></label>
@@ -89,6 +105,11 @@
     <div class="inline">
       <button type="button" class="ghost" id="add-row">+ 增加一段区间</button>
       <button type="submit">提交更正</button>
+      {% if can_review %}
+        <button type="submit" class="ghost" formaction="{{ url_for('knowledge_review') }}" formmethod="post">
+          打开核对页（保留原基准 v{{ base_version }}）
+        </button>
+      {% endif %}
     </div>
   </form>
 </section>

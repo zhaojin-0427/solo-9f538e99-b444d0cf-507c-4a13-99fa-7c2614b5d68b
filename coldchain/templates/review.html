@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}核对整组替换 · 冷链温区账本{% endblock %}
+{% block content %}
+<h1>核对草稿并确认整组替换</h1>
+
+{% if error %}
+  <div class="flash flash-error">
+    <strong>{{ error }}</strong>
+    {% if error_details %}<ul>{% for detail in error_details %}<li>{{ detail }}</li>{% endfor %}</ul>{% endif %}
+  </div>
+{% endif %}
+
+<section class="card">
+  <p>
+    SKU <strong>{{ state.sku }}</strong>，
+    草稿原基准
+    <strong>{{ ('v' ~ state.draft_base_version) if state.draft_base_version else '空账本' }}</strong>，
+    当前最新版 <strong>{{ ('v' ~ state.reviewed_version) if state.reviewed_version else '空账本' }}</strong>。
+  </p>
+  {% if state.requires_confirmation %}
+    <p class="muted">
+      草稿所依据的版号已不是当前最新版。确认后将以草稿整组替换
+      <strong>当前版 v{{ state.reviewed_version }}</strong> 中该 SKU 的全部区间；
+      当前版中其他 SKU 的区间原样带入新版，其他 SKU 的任何更正都会保留。
+    </p>
+  {% else %}
+    <p class="muted">草稿仍以当前最新版为基准；在此确认将直接按普通更正生成新版。</p>
+  {% endif %}
+  {% if state.stale_since_review %}
+    <div class="flash flash-error">
+      上次核对之后账本又生成了新版，本页已按当前版
+      <strong>v{{ state.reviewed_version }}</strong> 重新展示；
+      如仍要提交草稿，请重新确认。
+    </div>
+  {% endif %}
+  {% if state.already_confirmed %}
+    <div class="flash flash-error">
+      该草稿已确认并生成 v{{ state.already_confirmed.version_no }}，
+      重复确认不会再生成新版。
+    </div>
+  {% endif %}
+</section>
+
+<section class="review-grid">
+  <div class="card">
+    <h2>原基准 {{ ('v' ~ state.draft_base_version) if state.draft_base_version else '空账本' }}</h2>
+    {% if state.base_ranges %}
+      <table class="compact">
+        <thead><tr><th>温区</th><th>生效（含）</th><th>失效（不含）</th></tr></thead>
+        <tbody>
+        {% for interval in state.base_ranges %}
+          <tr>
+            <td>{{ interval.zone }}</td>
+            <td class="mono">{{ display_utc(interval.valid_from) }}</td>
+            <td class="mono">{{ display_utc(interval.valid_to) if interval.valid_to else '持续有效' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">该版中此 SKU 没有任何区间。</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>当前版 {{ ('v' ~ state.reviewed_version) if state.reviewed_version else '空账本' }}</h2>
+    {% if state.current_ranges %}
+      <table class="compact">
+        <thead><tr><th>温区</th><th>生效（含）</th><th>失效（不含）</th></tr></thead>
+        <tbody>
+        {% for interval in state.current_ranges %}
+          <tr>
+            <td>{{ interval.zone }}</td>
+            <td class="mono">{{ display_utc(interval.valid_from) }}</td>
+            <td class="mono">{{ display_utc(interval.valid_to) if interval.valid_to else '持续有效' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">当前版中此 SKU 没有任何区间。</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>草稿（待确认）</h2>
+    <p class="muted">更正原因：{{ state.reason }}</p>
+    {% if state.draft_ranges %}
+      <table class="compact">
+        <thead><tr><th>温区</th><th>生效（含）</th><th>失效（不含）</th></tr></thead>
+        <tbody>
+        {% for interval in state.draft_ranges %}
+          <tr>
+            <td>{{ interval.zone }}</td>
+            <td class="mono">{{ display_utc(interval.valid_from) }}</td>
+            <td class="mono">{{ display_utc(interval.valid_to) if interval.valid_to else '持续有效' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">草稿为空区间组。</p>
+    {% endif %}
+  </div>
+</section>
+
+{% if state.identical_to_current %}
+  <div class="card">
+    <p class="muted">草稿与当前版中该 SKU 的区间完全相同，确认不会生成新版。</p>
+  </div>
+{% endif %}
+
+{% if state.history and not state.already_confirmed %}
+  <div class="card">
+    <h2>该草稿的确认记录</h2>
+    <table class="compact">
+      <thead><tr><th>生成版号</th><th>草稿原基准</th><th>核对时当前版</th><th>时刻</th></tr></thead>
+      <tbody>
+      {% for entry in state.history %}
+        <tr>
+          <td>v{{ entry.version_no }}</td>
+          <td>{{ ('v' ~ entry.draft_base_version) if entry.draft_base_version else '空账本' }}</td>
+          <td>{{ ('v' ~ entry.reviewed_version) if entry.reviewed_version else '空账本' }}</td>
+          <td class="mono">{{ display_utc(entry.created_at) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
+<section class="card">
+  <h2>明确确认</h2>
+  <p class="muted">
+    确认只会提交本页展示的草稿。若草稿被改动，或账本在核对之后又生成了新版，
+    都必须重新打开核对页并再次确认。确认失败不会留下新版或复核记录。
+  </p>
+  {% if state.already_confirmed %}
+    <p><a class="button" href="{{ url_for('knowledge_page', version=state.already_confirmed.version_no) }}">查看已生成的 v{{ state.already_confirmed.version_no }}</a></p>
+  {% elif state.identical_to_current %}
+    <p><a class="button ghost" href="{{ url_for('knowledge_page', version=state.reviewed_version) }}">返回当前版 v{{ state.reviewed_version }}</a></p>
+  {% else %}
+    <form method="post" action="{{ url_for('knowledge_review_confirm') }}" class="stack">
+      <input type="hidden" name="review_token" value="{{ state.token }}">
+      <input type="hidden" name="reviewed_version" value="{{ state.reviewed_version }}">
+      <input type="hidden" name="sku" value="{{ state.sku }}">
+      <input type="hidden" name="reason" value="{{ state.reason }}">
+      <input type="hidden" name="base_version" value="{{ state.draft_base_version if state.draft_base_version is not none else '' }}">
+      {% for interval in state.draft_ranges %}
+        <input type="hidden" name="zone" value="{{ interval.zone }}">
+        <input type="hidden" name="valid_from" value="{{ interval.valid_from }}">
+        <input type="hidden" name="valid_to" value="{{ interval.valid_to or '' }}">
+      {% endfor %}
+      <div class="inline">
+        <button type="submit">确认整组替换并生成新版</button>
+        <a class="button ghost" href="{{ url_for('knowledge_page', version=state.reviewed_version) if state.reviewed_version else url_for('knowledge_page') }}">取消</a>
+      </div>
+    </form>
+  {% endif %}
+</section>
+{% endblock %}

@@ -9,7 +9,11 @@ rewrite what an older version reported.
 
 from __future__ import annotations
 
+import base64
 import bisect
+import hashlib
+import hmac
+import json
 import re
 import sqlite3
 
@@ -27,6 +31,8 @@ MAX_SKU_LENGTH = 64
 MAX_ZONE_LENGTH = 32
 MAX_REASON_LENGTH = 500
 MAX_VERSION_NUMBER = 2_147_483_647
+MAX_TOKEN_LENGTH = 65_536
+REVIEW_TOKEN_VERSION = 1
 
 _ZONE_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -163,38 +169,40 @@ def get_version(conn, version_no):
     ).fetchone()
 
 
-def register_ranges(conn, sku, intervals, reason, base_version=None):
+def register_ranges(conn, sku, intervals, reason, base_version=None,
+                    review=None, secret=None):
     """Create a new immutable version with a whole-group correction for ``sku``.
 
     ``base_version`` is the version the operator was looking at. It must be
     the current latest version; otherwise another correction has landed in
     between and the request is rejected without writing anything.
+
+    ``review`` is the explicit override for exactly that situation: a dict
+    ``{"token": ...}`` signed by :func:`prepare_review` / :func:`review_draft`.
+    It lets a stale draft be applied only after the operator has seen the
+    original base, the current version and the draft side by side. The signed
+    receipt binds the exact draft and the exact ledger version that was on
+    screen: editing the draft, or a further correction landing in the ledger,
+    invalidates it and forces a fresh review. The draft's original
+    ``base_version`` is still what the new version records.
     """
     sku = normalize_sku(sku)
     reason = normalize_reason(reason)
     parsed = parse_intervals(intervals)
-    if not parsed and (base_version is None or str(base_version).strip() == ""):
-        raise ValidationError("首个知识版本不能是空区间组；请至少登记一段区间")
 
     with transaction(conn):
         latest = latest_version_no(conn)
-        if base_version is None or str(base_version).strip() == "":
-            if latest is not None:
-                raise ConflictError(
-                    f"已有知识版号 v{latest}，请载入当前版后再更正（避免覆盖他人更正）"
-                )
+        review_row = None
+        if review is not None:
+            review_row = _verify_review(
+                conn, review, sku, reason, base_version, parsed, latest, secret
+            )
+            request_base = review_row["draft_base_version"]
         else:
-            try:
-                requested = int(str(base_version).strip())
-            except (TypeError, ValueError):
-                raise ValidationError("基准知识版号必须是整数") from None
-            if latest is None:
-                raise ConflictError("尚无任何知识版本，基准版号应为空")
-            if requested != latest:
-                raise ConflictError(
-                    f"基准版号 v{requested} 不是当前最新版 v{latest}；"
-                    "请刷新后基于最新版重新更正"
-                )
+            request_base = _check_plain_base(base_version, latest)
+
+        if not parsed and request_base is None:
+            raise ValidationError("首个知识版本不能是空区间组；请至少登记一段区间")
 
         carried = []
         if latest is not None:
@@ -240,8 +248,22 @@ def register_ranges(conn, sku, intervals, reason, base_version=None):
             conn.execute(
                 "INSERT INTO knowledge_versions(version_no, based_on_version, reason, created_at)"
                 " VALUES(?,?,?,?)",
-                (version_no, latest, reason, created_at),
+                (version_no, request_base, reason, created_at),
             )
+            if review_row is not None:
+                conn.execute(
+                    "INSERT INTO version_reviews(token_id, version_no, sku,"
+                    " draft_base_version, reviewed_version, created_at)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (
+                        review_row["token_id"],
+                        version_no,
+                        sku,
+                        review_row["draft_base_version"],
+                        review_row["reviewed_version"],
+                        created_at,
+                    ),
+                )
             conn.executemany(
                 "INSERT INTO version_ranges(version_no, sku, zone, valid_from, valid_from_us,"
                 " valid_to, valid_to_us) VALUES(?,?,?,?,?,?,?)",
@@ -260,23 +282,323 @@ def register_ranges(conn, sku, intervals, reason, base_version=None):
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"版本写入被拒绝：{exc}（未产生任何半版）") from exc
+        if review_row is not None:
+            summary = (
+                f"v{version_no} 经核对确认整组替换 SKU {sku}：{len(parsed)} 段，"
+                f"草稿原基准 v{review_row['draft_base_version']}，"
+                f"核对时当前版 v{review_row['reviewed_version']}，原因：{reason}"
+            )
+        else:
+            summary = f"v{version_no} 更正 SKU {sku}：{len(parsed)} 段，原因：{reason}"
         conn.execute(
             "INSERT INTO audit_log(at, action, month, version_no, summary) VALUES(?,?,?,?,?)",
-            (
-                created_at,
-                "register_ranges",
-                None,
-                version_no,
-                f"v{version_no} 更正 SKU {sku}：{len(parsed)} 段，原因：{reason}",
-            ),
+            (created_at, "register_ranges", None, version_no, summary),
         )
     return {
         "version_no": version_no,
-        "based_on_version": latest,
+        "based_on_version": request_base,
         "sku": sku,
         "range_count": len(parsed),
         "created_at": created_at,
+        "reviewed_version": review_row["reviewed_version"] if review_row else None,
     }
+
+
+def _check_plain_base(base_version, latest):
+    """Validate an ordinary (non-reviewed) submission against the latest version."""
+    if base_version is None or str(base_version).strip() == "":
+        if latest is not None:
+            raise ConflictError(
+                f"已有知识版号 v{latest}，请载入当前版后再更正（避免覆盖他人更正）"
+            )
+        return None
+    try:
+        requested = int(str(base_version).strip())
+    except (TypeError, ValueError):
+        raise ValidationError("基准知识版号必须是整数") from None
+    if latest is None:
+        raise ConflictError("尚无任何知识版本，基准版号应为空")
+    if requested != latest:
+        raise ConflictError(
+            f"基准版号 v{requested} 不是当前最新版 v{latest}；"
+            "请刷新后基于最新版重新更正，或打开核对页并排核对后确认整组替换"
+        )
+    return requested
+
+
+def _verify_review(conn, review, sku, reason, base_version, parsed, latest, secret):
+    """Check a signed review receipt against the submitted draft and ledger."""
+    if not isinstance(review, dict):
+        raise ValidationError("核对确认参数格式不正确")
+    draft, token_reviewed, token_id = _decode_token(review.get("token"), secret)
+    try:
+        reviewed_version = int(review.get("reviewed_version"))
+    except (TypeError, ValueError):
+        raise ValidationError("核对确认缺少已核对版号，请重新打开核对页") from None
+    if reviewed_version != token_reviewed:
+        raise ValidationError("核对确认的回执与已核对版号不一致，请重新核对")
+
+    draft_sku = normalize_sku(draft.get("sku"))
+    draft_reason = normalize_reason(draft.get("reason"))
+    draft_base = _int_or_none(draft.get("base_version"))
+    draft_intervals = parse_intervals(draft.get("intervals") or [])
+
+    if draft_sku != sku:
+        raise ValidationError("提交的 SKU 与核对页展示的草稿不一致，请重新核对")
+    if draft_reason != reason:
+        raise ValidationError("提交的更正原因与核对页展示的草稿不一致，请重新核对")
+    if draft_base != _int_or_none(base_version):
+        raise ValidationError("提交的基准版号与核对页展示的草稿不一致，请重新核对")
+    if _signature(draft_intervals) != _signature(parsed):
+        raise ValidationError("提交的区间与核对页展示的草稿不一致，请重新核对")
+
+    if latest is None or reviewed_version != latest:
+        raise ConflictError(
+            f"知识账本在核对后又生成了新版 v{latest}；请重新打开核对页，"
+            "并排核对原基准、当前版和草稿后再确认"
+        )
+    if draft_base is not None and get_version(conn, draft_base) is None:
+        raise ValidationError(f"草稿的原基准版号 v{draft_base} 不存在，请重新核对")
+    if draft_base is None and latest is not None:
+        raise ConflictError("该草稿以空账本为基准，但账本已有版号；请重新核对")
+
+    existing = conn.execute(
+        "SELECT version_no FROM version_reviews WHERE token_id = ?", (token_id,)
+    ).fetchone()
+    if existing is not None:
+        raise ConflictError(
+            f"该草稿已确认并生成 v{existing['version_no']}，重复确认不会再生成新版"
+        )
+    return {
+        "token_id": token_id,
+        "draft_base_version": draft_base,
+        "reviewed_version": reviewed_version,
+    }
+
+
+def prepare_review(conn, sku, intervals, reason, base_version, secret=None):
+    """Validate a draft and return the side-by-side review state for it."""
+    sku = normalize_sku(sku)
+    reason = normalize_reason(reason)
+    parsed = parse_intervals(intervals)
+    base = _int_or_none(base_version)
+    return _review_state(conn, sku, reason, parsed, base, secret, None)
+
+
+def review_draft(conn, token, secret=None):
+    """Re-render the review page from a previously signed receipt.
+
+    The draft is decoded from the receipt, so the page always shows exactly
+    what will be submitted. The ledger state is read fresh: if a new version
+    landed since the receipt was signed, the page is re-rendered against the
+    new current version and a fresh receipt is issued, which means the
+    operator has to confirm again.
+    """
+    draft, _reviewed, _token_id = _decode_token(token, secret)
+    sku = normalize_sku(draft.get("sku"))
+    reason = normalize_reason(draft.get("reason"))
+    parsed = parse_intervals(draft.get("intervals") or [])
+    base = _int_or_none(draft.get("base_version"))
+    return _review_state(conn, sku, reason, parsed, base, secret, token)
+
+
+def _review_state(conn, sku, reason, parsed, draft_base, secret, previous_token):
+    with transaction(conn, immediate=False):
+        latest = latest_version_no(conn)
+        if draft_base is not None and get_version(conn, draft_base) is None:
+            raise ValidationError(f"草稿的原基准版号 v{draft_base} 不存在，无法核对")
+        if draft_base is None and latest is not None:
+            raise ConflictError(
+                "该草稿以空账本为基准，但账本已有版号；请重新登记后再核对"
+            )
+        base_rows = _group_for_sku(conn, draft_base, sku)
+        current_rows = _group_for_sku(conn, latest, sku)
+        token_id = _draft_id(sku, reason, draft_base, parsed)
+        history = _review_history(conn, token_id)
+
+    base_ranges = _display_group(base_rows)
+    current_ranges = _display_group(current_rows)
+    draft_ranges = _display_group(parsed)
+    already_confirmed = history[0] if history else None
+    identical = latest is not None and _display_equal(current_ranges, draft_ranges)
+    last_reviewed = _decode_token(previous_token, secret)[1] if previous_token else None
+    # A review is a point-in-time act: if the ledger moved on since the last
+    # page render, or this draft was already applied, the operator must look
+    # again and confirm explicitly.
+    requires_new_review = bool(history) or (
+        last_reviewed is not None and last_reviewed != latest
+    )
+    token = _encode_token(sku, reason, draft_base, parsed, latest, secret)
+    return {
+        "token": token,
+        "token_id": token_id,
+        "sku": sku,
+        "reason": reason,
+        "draft": _draft_payload(sku, reason, draft_base, parsed),
+        "draft_base_version": draft_base,
+        "reviewed_version": latest,
+        "last_reviewed_version": last_reviewed,
+        "stale_since_review": last_reviewed is not None and last_reviewed != latest,
+        "base_ranges": base_ranges,
+        "current_ranges": current_ranges,
+        "draft_ranges": draft_ranges,
+        "history": history,
+        "already_confirmed": already_confirmed,
+        "identical_to_current": identical,
+        "requires_new_review": requires_new_review,
+        "requires_confirmation": latest != draft_base,
+    }
+
+
+def _group_for_sku(conn, version_no, sku):
+    if version_no is None:
+        return []
+    return [row for row in load_ranges(conn, version_no) if row["sku"] == sku]
+
+
+def _display_group(items):
+    """Display rows keep the canonical wire values used by the confirm form."""
+    return [
+        {
+            "zone": item["zone"],
+            "valid_from": item["valid_from"],
+            "valid_to": item["valid_to"],
+        }
+        for item in items
+    ]
+
+
+def _display_equal(left, right):
+    if len(left) != len(right):
+        return False
+    for a, b in zip(left, right):
+        if (
+            a["zone"] != b["zone"]
+            or a["valid_from"] != b["valid_from"]
+            or a["valid_to"] != b["valid_to"]
+        ):
+            return False
+    return True
+
+
+def _signature(parsed):
+    return [
+        (item["zone"], item["valid_from_us"], item["valid_to_us"])
+        for item in parsed
+    ]
+
+
+def _int_or_none(value):
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValidationError("知识版号必须是整数") from None
+
+
+def _draft_payload(sku, reason, draft_base, parsed):
+    return {
+        "sku": sku,
+        "reason": reason,
+        "base_version": draft_base,
+        "intervals": [
+            {
+                "zone": item["zone"],
+                "valid_from": item["valid_from"],
+                "valid_to": item["valid_to"],
+            }
+            for item in parsed
+        ],
+    }
+
+
+def _draft_id(sku, reason, draft_base, parsed):
+    canonical = json.dumps(
+        _draft_payload(sku, reason, draft_base, parsed),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _token_key(secret):
+    # The receipt must be unforgeable so a confirmation can only ever submit a
+    # draft that a review page actually displayed.
+    return (secret if secret is not None else "").encode("utf-8")
+
+
+def _encode_token(sku, reason, draft_base, parsed, reviewed_version, secret):
+    payload = json.dumps(
+        {
+            "v": REVIEW_TOKEN_VERSION,
+            "reviewed_version": reviewed_version,
+            "draft": _draft_payload(sku, reason, draft_base, parsed),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    body = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    mac = hmac.new(_token_key(secret), body.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{body}.{mac}"
+
+
+def _decode_token(token, secret):
+    if not isinstance(token, str) or not token.strip():
+        raise ValidationError("缺少核对回执，请重新打开核对页")
+    text = token.strip()
+    if len(text) > MAX_TOKEN_LENGTH:
+        raise ValidationError("核对回执过长，请重新打开核对页")
+    body, _, mac = text.rpartition(".")
+    expected = hmac.new(
+        _token_key(secret), body.encode("ascii", "ignore"), hashlib.sha256
+    ).hexdigest()
+    if not body or not hmac.compare_digest(mac, expected):
+        raise ValidationError("核对回执无效或已过期，请重新打开核对页")
+    try:
+        raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, TypeError, UnicodeDecodeError):
+        raise ValidationError("核对回执格式不正确，请重新打开核对页") from None
+    if not isinstance(payload, dict) or payload.get("v") != REVIEW_TOKEN_VERSION:
+        raise ValidationError("核对回执格式不正确，请重新打开核对页")
+    draft = payload.get("draft")
+    if not isinstance(draft, dict):
+        raise ValidationError("核对回执缺少草稿内容，请重新打开核对页")
+    try:
+        reviewed_version = int(payload.get("reviewed_version"))
+    except (TypeError, ValueError):
+        raise ValidationError("核对回执缺少已核对版号，请重新打开核对页") from None
+    token_id = _draft_id(
+        normalize_sku(draft.get("sku")),
+        normalize_reason(draft.get("reason")),
+        _int_or_none(draft.get("base_version")),
+        parse_intervals(draft.get("intervals") or []),
+    )
+    return draft, reviewed_version, token_id
+
+
+def review_for_version(conn, version_no):
+    """Return the review record that created ``version_no``, if any."""
+    row = conn.execute(
+        "SELECT token_id, version_no, sku, draft_base_version, reviewed_version, created_at"
+        " FROM version_reviews WHERE version_no = ?",
+        (version_no,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _review_history(conn, token_id):
+    rows = conn.execute(
+        "SELECT r.version_no, r.draft_base_version, r.reviewed_version, r.created_at,"
+        "       v.reason"
+        " FROM version_reviews r JOIN knowledge_versions v ON v.version_no = r.version_no"
+        " WHERE r.token_id = ? ORDER BY r.version_no DESC",
+        (token_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _same_group(previous_rows, new_items):

@@ -74,6 +74,20 @@ CREATE TABLE IF NOT EXISTS audit_log (
     version_no           INTEGER,
     summary              TEXT NOT NULL
 );
+
+-- A review is the explicit bridge between a draft based on an older version
+-- and the current ledger. The row is written in the same transaction that
+-- creates the new version, so a failed confirmation leaves neither a version
+-- nor a review record; ``token_id`` is unique so replaying the same
+-- confirmation can never create a second version.
+CREATE TABLE IF NOT EXISTS version_reviews (
+    token_id             TEXT PRIMARY KEY,
+    version_no           INTEGER NOT NULL UNIQUE REFERENCES knowledge_versions(version_no),
+    sku                  TEXT NOT NULL,
+    draft_base_version   INTEGER REFERENCES knowledge_versions(version_no),
+    reviewed_version     INTEGER REFERENCES knowledge_versions(version_no),
+    created_at           TEXT NOT NULL
+);
 """
 
 # Append-only protections. Facts and the knowledge ledger are never rewritten;
@@ -130,6 +144,14 @@ END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete
 BEFORE DELETE ON audit_log BEGIN
     SELECT RAISE(ABORT, 'audit log is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS reviews_no_update
+BEFORE UPDATE ON version_reviews BEGIN
+    SELECT RAISE(ABORT, 'review records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS reviews_no_delete
+BEFORE DELETE ON version_reviews BEGIN
+    SELECT RAISE(ABORT, 'review records are immutable');
 END;
 """
 

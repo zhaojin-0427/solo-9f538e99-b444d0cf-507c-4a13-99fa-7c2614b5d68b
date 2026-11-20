@@ -54,6 +54,8 @@ h3 { font-size: 1rem; margin: 1rem 0 0.4rem; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; }
 .grid .card { margin-bottom: 0; }
 .grid + .card, .grid + section { margin-top: 1rem; }
+.review-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.review-grid .card { margin-bottom: 0; }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
 th, td { text-align: left; padding: 0.42rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -137,5 +139,6 @@ footer { max-width: 1180px; margin: 0 auto; padding: 1rem 1.25rem 2rem; color: v
 
 @media (max-width: 640px) {
   .grid { grid-template-columns: 1fr; }
+  .review-grid { grid-template-columns: 1fr; }
   .interval-row { flex-direction: column; align-items: stretch; }
 }
