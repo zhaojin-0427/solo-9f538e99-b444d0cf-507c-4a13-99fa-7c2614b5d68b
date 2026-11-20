@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · 冷链温区账本{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<div class="card">
+  <p>{{ message }}</p>
+  {% if details %}
+    <ul>{% for detail in details %}<li>{{ detail }}</li>{% endfor %}</ul>
+  {% endif %}
+  <p><a class="button" href="{{ url_for('index') }}">返回总览</a></p>
+</div>
+{% endblock %}

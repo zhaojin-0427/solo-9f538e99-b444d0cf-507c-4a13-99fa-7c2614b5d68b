@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}月报核对 · 冷链温区账本{% endblock %}
+{% block content %}
+<h1>月报核对</h1>
+
+<form method="get" action="{{ url_for('report_page') }}" class="card inline">
+  <label>月份
+    <select name="month" required>
+      {% for month in months %}
+        <option value="{{ month.month }}" {{ 'selected' if month.month == selected_month else '' }}>{{ month.month }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>知识版号
+    <select name="version">
+      <option value="">最新版</option>
+      {% for version in versions %}
+        <option value="{{ version.version_no }}" {{ 'selected' if selected_version == version.version_no|string else '' }}>v{{ version.version_no }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">查询</button>
+  {% if report %}
+    <a class="button ghost" href="{{ url_for('api_report', month=report.month, version=report.version.version_no if report.version else '') }}">JSON</a>
+  {% endif %}
+</form>
+
+{% if not months %}
+  <p class="muted">尚无已固定月份，请先<a href="{{ url_for('upload_page') }}">上传月结 CSV</a>。</p>
+{% elif report %}
+  <section class="card">
+    <h2>{{ report.month }} 汇总
+      {% if report.version %}
+        <span class="badge">口径 v{{ report.version.version_no }}</span>
+      {% else %}
+        <span class="badge badge-warn">尚无温区知识版本，全部未归类</span>
+      {% endif %}
+    </h2>
+    <p class="muted">
+      该月事实固定于 {{ display_utc(report.month_row.frozen_at) }}（来源 {{ report.month_row.source_filename }}）；
+      共 {{ report.total_shipments }} 条出库 / {{ report.total_boxes }} 箱。
+      {% if report.version %}所用版号创建于 {{ display_utc(report.version.created_at) }}，原因：{{ report.version.reason }}。{% endif %}
+    </p>
+    <div class="totals">
+      <div><span class="label">已归类</span><strong>{{ report.classified_boxes }}</strong> 箱</div>
+      <div><span class="label">未归类</span><strong>{{ report.unclassified.boxes }}</strong> 箱</div>
+      <div><span class="label">合计</span><strong>{{ report.total_boxes }}</strong> 箱</div>
+    </div>
+
+    <table>
+      <thead>
+        <tr><th>温区</th><th>箱数</th><th>流水条数</th></tr>
+      </thead>
+      <tbody>
+      {% for bucket in report.zones %}
+        <tr>
+          <td><a href="#zone-{{ loop.index }}">{{ bucket.zone }}</a></td>
+          <td><strong>{{ bucket.boxes }}</strong></td>
+          <td>{{ bucket.shipment_count }}</td>
+        </tr>
+      {% endfor %}
+      <tr class="unclassified-row">
+        <td><a href="#unclassified">未归类</a></td>
+        <td><strong>{{ report.unclassified.boxes }}</strong></td>
+        <td>{{ report.unclassified.shipment_count }}</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  {% for bucket in report.zones %}
+    <section class="card" id="zone-{{ loop.index }}">
+      <h2>温区 {{ bucket.zone }} · {{ bucket.boxes }} 箱</h2>
+      <table class="compact">
+        <thead><tr><th>流水号</th><th>SKU</th><th>出库时刻</th><th>箱数</th><th>依据区间（起含止不含）</th></tr></thead>
+        <tbody>
+        {% for item in bucket.shipments %}
+          <tr>
+            <td class="mono">{{ item.sequence_no }}</td>
+            <td>{{ item.sku }}</td>
+            <td class="mono">{{ display_utc(item.occurred_at) }}</td>
+            <td>{{ item.boxes }}</td>
+            <td class="mono">{{ item.basis.zone }}: [{{ display_utc(item.basis.valid_from) }}, {{ display_utc(item.basis.valid_to) }})</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% endfor %}
+
+  <section class="card" id="unclassified">
+    <h2>未归类 · {{ report.unclassified.boxes }} 箱</h2>
+    {% if report.unclassified.shipments %}
+      <p class="muted">这些出库落在该 SKU 已登记区间之外的空档，或该 SKU 在本版号中没有区间。</p>
+      <table class="compact">
+        <thead><tr><th>流水号</th><th>SKU</th><th>出库时刻</th><th>箱数</th><th>本版该 SKU 的区间</th></tr></thead>
+        <tbody>
+        {% for item in report.unclassified.shipments %}
+          <tr>
+            <td class="mono">{{ item.sequence_no }}</td>
+            <td>{{ item.sku }}</td>
+            <td class="mono">{{ display_utc(item.occurred_at) }}</td>
+            <td>{{ item.boxes }}</td>
+            <td class="mono">
+              {% if item.sku_intervals %}
+                {% for interval in item.sku_intervals %}
+                  {{ interval.zone }}: [{{ display_utc(interval.valid_from) }}, {{ display_utc(interval.valid_to) }}){% if not loop.last %}<br>{% endif %}
+                {% endfor %}
+              {% else %}
+                <span class="muted">无区间</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">没有未归类的出库。</p>
+    {% endif %}
+  </section>
+{% endif %}
+{% endblock %}

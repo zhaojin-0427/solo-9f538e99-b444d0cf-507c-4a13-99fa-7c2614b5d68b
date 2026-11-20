@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}温区知识 · 冷链温区账本{% endblock %}
+{% block content %}
+<h1>温区知识</h1>
+
+{% if error %}
+  <div class="flash flash-error">
+    <strong>{{ error }}</strong>
+    {% if error_details %}<ul>{% for detail in error_details %}<li>{{ detail }}</li>{% endfor %}</ul>{% endif %}
+  </div>
+{% endif %}
+
+<section class="grid">
+  <div class="card">
+    <h2>版号历史</h2>
+    {% if versions %}
+      <table>
+        <thead><tr><th>版号</th><th>基准</th><th>SKU</th><th>区间</th><th>创建时刻</th></tr></thead>
+        <tbody>
+        {% for version in versions %}
+          <tr class="{{ 'selected' if selected and selected.version_no == version.version_no else '' }}">
+            <td><a href="{{ url_for('knowledge_page', version=version.version_no) }}">v{{ version.version_no }}</a></td>
+            <td>{{ ('v' ~ version.based_on_version) if version.based_on_version else '—' }}</td>
+            <td>{{ version.sku_count }}</td>
+            <td>{{ version.range_count }}</td>
+            <td class="mono">{{ display_utc(version.created_at) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">尚无版本。提交下方表单即可创建 v1。</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>{% if selected %}v{{ selected.version_no }} 的区间{% else %}尚未登记{% endif %}</h2>
+    {% if selected %}
+      <p class="muted">创建于 {{ display_utc(selected.created_at) }}，原因：{{ selected.reason }}</p>
+      {% if groups %}
+        {% for group in groups %}
+          <div class="sku-block">
+            <h3>{{ group.sku }}</h3>
+            <table class="compact">
+              <thead><tr><th>温区</th><th>生效（含）</th><th>失效（不含）</th></tr></thead>
+              <tbody>
+              {% for interval in group.intervals %}
+                <tr>
+                  <td>{{ interval.zone }}</td>
+                  <td class="mono">{{ interval.valid_from }}</td>
+                  <td class="mono">{{ interval.valid_to or '持续有效' }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">该版没有任何区间。</p>
+      {% endif %}
+    {% endif %}
+  </div>
+</section>
+
+{% set form_data = form if form else {'sku': '', 'reason': '', 'intervals': [{'zone': '', 'valid_from': '', 'valid_to': ''}]} %}
+<section class="card">
+  <h2>整组更正并生成新版号</h2>
+  <p class="muted">
+    本次提交会以 <strong>{{ ('v' ~ base_version) if base_version else '空账本' }}</strong> 为基准，
+    用下列区间<strong>整体替换</strong>该 SKU 的区间；其他 SKU 的区间原样带入新版。
+    同一 SKU 区间不得重叠，空档期间的出库将列为未归类。
+  </p>
+  <form method="post" action="{{ url_for('knowledge_submit') }}" class="stack" id="knowledge-form">
+    <input type="hidden" name="base_version" value="{{ base_version }}">
+    <div class="inline">
+      <label>SKU <input type="text" name="sku" value="{{ form_data.sku }}" required maxlength="64"></label>
+      <label class="grow">更正原因 <input type="text" name="reason" value="{{ form_data.reason }}" required maxlength="500"></label>
+    </div>
+    <div id="interval-rows">
+      {% for interval in form_data.intervals %}
+        <div class="interval-row">
+          <label>温区 <input type="text" name="zone" value="{{ interval.zone }}" placeholder="冷藏 / 冷冻" required maxlength="32"></label>
+          <label>生效（含）<input type="text" name="valid_from" value="{{ interval.valid_from }}" placeholder="2026-03-01T00:00:00Z" required></label>
+          <label>失效（不含）<input type="text" name="valid_to" value="{{ interval.valid_to }}" placeholder="留空表示持续有效"></label>
+          <button type="button" class="ghost remove-row" aria-label="删除该行">×</button>
+        </div>
+      {% endfor %}
+    </div>
+    <div class="inline">
+      <button type="button" class="ghost" id="add-row">+ 增加一段区间</button>
+      <button type="submit">提交更正</button>
+    </div>
+  </form>
+</section>
+
+<template id="row-template">
+  <div class="interval-row">
+    <label>温区 <input type="text" name="zone" placeholder="冷藏 / 冷冻" required maxlength="32"></label>
+    <label>生效（含）<input type="text" name="valid_from" placeholder="2026-03-01T00:00:00Z" required></label>
+    <label>失效（不含）<input type="text" name="valid_to" placeholder="留空表示持续有效"></label>
+    <button type="button" class="ghost remove-row" aria-label="删除该行">×</button>
+  </div>
+</template>
+
+<script>
+  (function () {
+    const rows = document.getElementById('interval-rows');
+    const template = document.getElementById('row-template');
+    document.getElementById('add-row').addEventListener('click', function () {
+      rows.appendChild(template.content.cloneNode(true));
+    });
+    rows.addEventListener('click', function (event) {
+      if (!event.target.classList.contains('remove-row')) return;
+      const row = event.target.closest('.interval-row');
+      if (rows.querySelectorAll('.interval-row').length > 1) {
+        row.remove();
+      } else {
+        row.querySelectorAll('input').forEach(function (input) { input.value = ''; });
+      }
+    });
+  })();
+</script>
+{% endblock %}

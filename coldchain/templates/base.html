@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}冷链温区账本{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{{ url_for('index') }}">❄ 冷链温区账本</a>
+  <nav>
+    <a href="{{ url_for('index') }}">总览</a>
+    <a href="{{ url_for('upload_page') }}">上传月结</a>
+    <a href="{{ url_for('knowledge_page') }}">温区知识</a>
+    <a href="{{ url_for('report_page') }}">月报核对</a>
+  </nav>
+</header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flashes">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+<footer>
+  <span>出库事实按 UTC 月冻结，只追加；温区更正生成新知识版号，旧版号口径永久保留。</span>
+</footer>
+</body>
+</html>

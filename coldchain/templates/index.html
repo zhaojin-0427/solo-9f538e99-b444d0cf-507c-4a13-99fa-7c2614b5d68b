@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}总览 · 冷链温区账本{% endblock %}
+{% block content %}
+<h1>总览</h1>
+
+<section class="grid">
+  <div class="card">
+    <h2>已固定月份</h2>
+    {% if months %}
+      <table>
+        <thead><tr><th>月份</th><th>行数</th><th>箱数</th><th>固定时刻</th><th></th></tr></thead>
+        <tbody>
+        {% for month in months %}
+          <tr>
+            <td><strong>{{ month.month }}</strong></td>
+            <td>{{ month.row_count }}</td>
+            <td>{{ month.total_boxes }}</td>
+            <td class="mono">{{ display_utc(month.frozen_at) }}</td>
+            <td><a href="{{ url_for('report_page', month=month.month) }}">核对月报</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">尚未上传任何月份的出库 CSV。</p>
+      <p><a class="button" href="{{ url_for('upload_page') }}">上传单月出库 CSV</a></p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>温区知识版号</h2>
+    {% if latest %}
+      <p>当前最新版：<strong>v{{ latest.version_no }}</strong>
+        <span class="muted">（{{ latest.sku_count }} 个 SKU / {{ latest.range_count }} 段区间，创建于 {{ display_utc(latest.created_at) }}）</span>
+      </p>
+      <table>
+        <thead><tr><th>版号</th><th>基准</th><th>SKU</th><th>区间</th><th>原因</th></tr></thead>
+        <tbody>
+        {% for version in versions %}
+          <tr>
+            <td><a href="{{ url_for('knowledge_page', version=version.version_no) }}">v{{ version.version_no }}</a></td>
+            <td>{{ ('v' ~ version.based_on_version) if version.based_on_version else '—' }}</td>
+            <td>{{ version.sku_count }}</td>
+            <td>{{ version.range_count }}</td>
+            <td class="truncate">{{ version.reason }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">尚无温区知识版本。请先在「温区知识」登记首个版号。</p>
+      <p><a class="button" href="{{ url_for('knowledge_page') }}">登记温区</a></p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>规则速查</h2>
+  <ul>
+    <li>单月出库 CSV 上传成功后，该月事实立即固定；重复上传或改写会被拒绝。</li>
+    <li>温区按 SKU 登记 <code>[起, 止)</code> 区间，起含止不含；同一版同一 SKU 区间不得重叠。</li>
+    <li>未落入任何区间的出库列在「未归类」，其箱数不计入任何温区。</li>
+    <li>每次整组更正生成新知识版号；补登过去生效的区间只会改变新版汇总，旧版号返回原口径。</li>
+  </ul>
+</section>
+{% endblock %}

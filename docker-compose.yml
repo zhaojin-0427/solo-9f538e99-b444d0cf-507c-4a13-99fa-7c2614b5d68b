@@ -1,0 +1,21 @@
+services:
+  coldchain:
+    build: .
+    image: coldchain-ledger:latest
+    ports:
+      - "${COLDCHAIN_PORT:-8000}:8000"
+    environment:
+      COLDCHAIN_DB: /data/coldchain.sqlite3
+      COLDCHAIN_SECRET: ${COLDCHAIN_SECRET:-change-me-in-production}
+    volumes:
+      - coldchain-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  coldchain-data:
